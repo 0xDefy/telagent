@@ -1,0 +1,5 @@
+{
+  "channels": [],
+  "output_dir": "data/messages",
+  "database_path": "data/messages.sqlite3"
+}
