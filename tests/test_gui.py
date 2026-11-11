@@ -7,11 +7,40 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from gui import query_messages, configured_path, re_api_hash
-from telagent import gui_answer, GUI_PROMPT, init_database, upsert_record
+from gui import COMBINED, query_messages, configured_path, re_api_hash
+from telagent import (GUI_PROMPT, atomic_json, gui_answer, init_database,
+                      sync_channel_selection, upsert_record)
 
 
 class DesktopTests(unittest.TestCase):
+    def test_combined_feed_tracks_selection_and_preserves_archive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "messages.sqlite3"
+            config = root / "config.json"
+            init_database(database)
+            for index, name in enumerate(("Release", "Community", "Archived")):
+                upsert_record(database, {"channel_id": -100123 - index, "message_id": 1,
+                                         "channel_name": name, "text": "same keyword",
+                                         "published_at": f"2026-11-11T12:0{index}:00+00:00"})
+            preferences = {"database_path": database.name, "channels": [-100123, -100124]}
+            atomic_json(config, preferences)
+            sync_channel_selection(config)
+            total, rows = query_messages(database, "keyword", COMBINED, previews=True)
+            self.assertEqual(total, 2)
+            self.assertEqual([row[0] for row in rows], ["Community", "Release"])
+            self.assertEqual(query_messages(database, "keyword", -100125)[0], 1)
+            self.assertEqual(query_messages(database, "Archived", COMBINED)[1], [])
+            preferences["channels"] = [-100125]
+            atomic_json(config, preferences)
+            sync_channel_selection(config)
+            self.assertEqual([row[0] for row in query_messages(database, scope=COMBINED)[1]], ["Archived"])
+            preferences["channels"] = []
+            atomic_json(config, preferences)
+            sync_channel_selection(config)
+            self.assertEqual(query_messages(database, scope=COMBINED), (0, []))
+            self.assertEqual(query_messages(database)[0], 3)
+
     def test_search_preserves_unicode_and_treats_wildcards_literally(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "messages.sqlite3"

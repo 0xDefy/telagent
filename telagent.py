@@ -42,9 +42,11 @@ def add_to_config(path, channel_id):
     # Read again to preserve unrelated preferences and the latest selection.
     config = load_config(path)
     if channel_id in config.get("channels", []):
+        sync_channel_selection(path)
         return False
     config.setdefault("channels", []).append(channel_id)
     atomic_json(path, config)
+    sync_channel_selection(path)
     return True
 
 
@@ -123,7 +125,7 @@ def make_record(message, channel):
 
 def init_database(path):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with closing(sqlite3.connect(path)) as db, db:
+    with closing(sqlite3.connect(path, timeout=1)) as db, db:
         db.execute("""CREATE TABLE IF NOT EXISTS messages (
             channel_id INTEGER NOT NULL,
             message_id INTEGER NOT NULL,
@@ -138,6 +140,27 @@ def init_database(path):
             PRIMARY KEY (channel_id, message_id)
         )""")
         db.execute("CREATE INDEX IF NOT EXISTS messages_published_at ON messages(published_at)")
+        db.execute("CREATE TABLE IF NOT EXISTS selected_channels (channel_id INTEGER PRIMARY KEY)")
+        db.execute("""CREATE VIEW IF NOT EXISTS collective_messages AS
+                      SELECT messages.* FROM messages
+                      JOIN selected_channels USING (channel_id)""")
+
+
+def database_path(config_path, config):
+    return config_path.resolve().parent / Path(config.get("database_path", "data/messages.sqlite3"))
+
+
+def sync_channel_selection(config_path):
+    """Refresh the database's selected channel IDs from the local configuration."""
+    database = database_path(config_path, load_config(config_path))
+    init_database(database)
+    with closing(sqlite3.connect(database, timeout=1)) as db, db:
+        db.execute("BEGIN IMMEDIATE")
+        selected = set(load_config(config_path).get("channels", []))
+        stored = {row[0] for row in db.execute("SELECT channel_id FROM selected_channels")}
+        db.executemany("DELETE FROM selected_channels WHERE channel_id=?", ((cid,) for cid in stored - selected))
+        db.executemany("INSERT INTO selected_channels VALUES (?)", ((cid,) for cid in selected - stored))
+    return selected
 
 
 def upsert_record(database, record):
@@ -224,14 +247,12 @@ async def run_collector(args):
     output = Path(config.get("output_dir", "data/messages"))
     if not output.is_absolute():
         output = args.config.resolve().parent / output
-    database = Path(config.get("database_path", "data/messages.sqlite3"))
-    if not database.is_absolute():
-        database = args.config.resolve().parent / database
+    database = database_path(args.config, config)
     if args.command != "list-channels":
-        if not config.get("channels"):
+        selected = sync_channel_selection(args.config)
+        if not selected and args.command != "sync-db":
             raise ValueError("No channels selected. Add IDs to config.json")
-        init_database(database)
-        count = sync_database(output, database, set(config["channels"]))
+        count = sync_database(output, database, selected)
         LOG.info("Synced %s existing JSON records to %s", count, database)
         if args.command == "sync-db":
             return
@@ -290,12 +311,16 @@ async def run_collector(args):
             return
 
         failure = []
+        stored_selection = selected
 
         async def capture(event):
+            nonlocal stored_selection
             try:
                 # Reload on each event so local add-channel changes take effect
                 # without opening another Telegram connection or restarting.
                 current = set(load_config(args.config).get("channels", []))
+                if current != stored_selection:
+                    stored_selection = sync_channel_selection(args.config)
                 if event.chat_id not in current or event.chat_id not in channels:
                     return
                 if save_record(output, make_record(event.message, channels[event.chat_id]), database):

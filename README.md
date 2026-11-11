@@ -66,7 +66,9 @@ session in `data/` permits account access: keep it private.
   username changes. Selection changes do not erase old records.
 - **History & storage:** import the latest N messages per selected channel, or sync
   existing JSON into SQLite. Stop monitoring before these tasks.
-- **Messages:** search text/channel names, inspect full JSON, export a record, and
+- **Messages:** use the Channel picker to see all selected channels together, one
+  channel, or the full archive. Search text/channel names, inspect full JSON,
+  export a record, and
   open storage folders. The latest 500 matches are shown; older records remain in
   the database. The view refreshes every three seconds.
 - **Activity:** task logs, connection status, and Start/Stop controls.
@@ -137,9 +139,13 @@ columns and complete `record_json`. The primary key `(channel_id, message_id)`
 prevents duplicates and keeps IDs from different channels separate. Edits update
 the same file and row. An index on `published_at` supports date queries.
 
+The `collective_messages` view joins the archive to `selected_channels` and
+exposes the full records for all selected channels. Selection changes update the
+view's membership. Previously saved messages remain available in `messages`.
+
 ```sql
 SELECT channel_name, message_id, published_at, text
-FROM messages
+FROM collective_messages
 ORDER BY published_at DESC
 LIMIT 20;
 ```
